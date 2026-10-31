@@ -1,4 +1,5 @@
 import "./styles/index.css";
+import { postToHost } from './editor/io/hostTransport';
 import { useEffect } from "react";
 import { X } from "lucide-react";
 import { DirectorDeskShell } from "./app/layout/DirectorDeskShell";
@@ -18,11 +19,11 @@ export default function App() {
 
   useEffect(() => {
     initDirectorDeskHostBridge();
-    window.parent?.postMessage({ type: "storyai:director-desk-ready" }, window.location.origin);
+    postToHost("storyai:director-desk-ready");
   }, []);
 
   function handleClose() {
-    window.parent?.postMessage({ type: "storyai:director-desk-close" }, window.location.origin);
+    postToHost("storyai:director-desk-close");
   }
 
   useEffect(() => {

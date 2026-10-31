@@ -10,7 +10,7 @@ import {
 } from "./InspectorControls";
 import { requestViewportCapture } from "../io/captureBridge";
 import { downloadDataUrl } from "../io/screenshotExport";
-import { postDirectorDeskCapturesToHost } from "../io/hostBridge";
+import { postDirectorDeskCapturesToHost, postDirectorDeskVideoToHost } from "../io/hostBridge";
 import { getDirectorObjectFocusTarget, isCameraFocusableObject } from "../schema/cameraTarget";
 import type { DirectorCameraCapture } from "../schema/directorProject";
 import { useDirectorStore } from "../store/directorStore";
@@ -27,6 +27,7 @@ function replaceAxis(tuple: [number, number, number], axis: 0 | 1 | 2, value: nu
 export function CameraPanel() {
   const [activeTab, setActiveTab] = useState<"properties" | "captures">("properties");
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [recordStatus, setRecordStatus] = useState<string | null>(null);
   const [hoveredCaptureId, setHoveredCaptureId] = useState<string | null>(null);
   const [viewerCapture, setViewerCapture] = useState<DirectorCameraCapture | null>(null);
   const [viewerScale, setViewerScale] = useState(1);
@@ -186,14 +187,26 @@ export function CameraPanel() {
     mediaRecorder.onstop = () => {
       const actualMimeType = mediaRecorder.mimeType || mimeType;
       const extension = actualMimeType.includes('mp4') ? 'mp4' : 'webm';
-      
+      const fileName = `${currentCamera.name}-path-animation.${extension}`;
+
       const blob = new Blob(chunks, { type: actualMimeType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${currentCamera.name}-path-animation.${extension}`;
+      a.download = fileName;
       a.click();
       URL.revokeObjectURL(url);
+
+      // 同时把这一份运镜视频发给宿主，落到画布的导演台节点上
+      void postDirectorDeskVideoToHost(blob, fileName).then((result) => {
+        if (result === "sent") {
+          setRecordStatus("运镜视频已发送到画布节点，同时已下载到本地");
+        } else if (result === "too-large") {
+          setRecordStatus("视频超过 64MB，已下载到本地但未发送到画布");
+        } else {
+          setRecordStatus("运镜视频发送到画布失败，已下载到本地");
+        }
+      });
     };
     
     mediaRecorder.start();
@@ -683,6 +696,7 @@ export function CameraPanel() {
               </button>
             )}
             {captureError ? <p>{captureError}</p> : null}
+            {recordStatus ? <p>{recordStatus}</p> : null}
             {renderCurrentCameraCaptureGrid()}
           </InspectorSection>
         </>

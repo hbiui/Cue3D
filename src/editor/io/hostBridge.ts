@@ -1,4 +1,5 @@
 import { useDirectorStore } from "../store/directorStore";
+import { postToHost, setInstanceId, subscribeHostMessage } from './hostTransport';
 
 interface HostPanoramaPayload {
   edgeId?: unknown;
@@ -29,14 +30,11 @@ interface HostConnectedPanorama {
 let initialized = false;
 let hostConnectedPanorama: HostConnectedPanorama | null = null;
 let removeUnsubscribe: (() => void) | null = null;
+let removeHostMessageUnsubscribe: (() => void) | null = null;
 let suppressNextPanoramaRemovalNotice = false;
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function getHostOrigin() {
-  return window.location.origin;
 }
 
 function normalizeTheme(value: unknown): "dark" | "light" | null {
@@ -61,13 +59,7 @@ function notifyPanoramaRemoved() {
     return;
   }
 
-  window.parent?.postMessage(
-    {
-      type: "storyai:director-desk-panorama-removed",
-      payload: hostConnectedPanorama,
-    },
-    getHostOrigin()
-  );
+  postToHost("storyai:director-desk-panorama-removed", hostConnectedPanorama);
   hostConnectedPanorama = null;
 }
 
@@ -119,6 +111,11 @@ function openHostSession(payload: HostSessionPayload) {
   if (theme) {
     applyDirectorDeskTheme(theme);
   }
+  // 窗口被所有节点复用，URL 上的 instanceId 只在首次创建时有效，
+  // 切换节点后必须用 session 带来的 id，否则回传的截图会落到上一个节点。
+  if (instanceId) {
+    setInstanceId(instanceId);
+  }
   suppressNextPanoramaRemovalNotice = Boolean(useDirectorStore.getState().project.panoramaAssetId);
   useDirectorStore.getState().openScopedScene(instanceId || null);
   suppressNextPanoramaRemovalNotice = false;
@@ -149,29 +146,57 @@ export function postDirectorDeskCapturesToHost(
     return;
   }
 
-  window.parent?.postMessage(
-    {
-      type: "storyai:director-desk-captures-sent",
-      payload: {
-        captures: normalizedCaptures,
-      },
-    },
-    getHostOrigin()
-  );
+  const capturePayload = { captures: normalizedCaptures };
+  postToHost("storyai:director-desk-captures-sent", capturePayload);
 }
 
-function handleHostMessage(event: MessageEvent) {
-  if (event.origin !== getHostOrigin()) {
+/** 运镜视频发送上限：宿主单文件落盘上限为 64MB */
+export const MAX_HOST_VIDEO_BYTES = 64 * 1024 * 1024;
+
+export type VideoSendResult = "sent" | "too-large" | "failed";
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取录制结果失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** 把录好的运镜动画发给宿主（画布节点），本地下载由调用方负责 */
+export async function postDirectorDeskVideoToHost(
+  blob: Blob,
+  fileName: string,
+): Promise<VideoSendResult> {
+  if (blob.size > MAX_HOST_VIDEO_BYTES) {
+    return "too-large";
+  }
+
+  try {
+    const dataUrl = await blobToDataUrl(blob);
+    if (!dataUrl.startsWith("data:video/")) {
+      return "failed";
+    }
+    postToHost("storyai:director-desk-video-sent", { dataUrl, fileName });
+    return "sent";
+  } catch {
+    return "failed";
+  }
+}
+
+function handleHostMessage(message: { type?: string; payload?: unknown }) {
+  if (!message || typeof message.type !== "string") {
     return;
   }
 
-  if (event.data?.type === "storyai:director-desk-session") {
-    openHostSession((event.data.payload || {}) as HostSessionPayload);
+  if (message.type === "storyai:director-desk-session") {
+    openHostSession((message.payload || {}) as HostSessionPayload);
     return;
   }
 
-  if (event.data?.type === "storyai:director-desk-panorama") {
-    importHostPanorama((event.data.payload || {}) as HostPanoramaPayload);
+  if (message.type === "storyai:director-desk-panorama") {
+    importHostPanorama((message.payload || {}) as HostPanoramaPayload);
   }
 }
 
@@ -182,7 +207,7 @@ export function initDirectorDeskHostBridge() {
 
   initialized = true;
   applyDirectorDeskTheme(getInitialHostTheme() ?? "dark");
-  window.addEventListener("message", handleHostMessage);
+  removeHostMessageUnsubscribe = subscribeHostMessage(handleHostMessage);
   subscribeToPanoramaRemoval();
 }
 
@@ -194,7 +219,8 @@ export function clearDirectorDeskHostBridge() {
   initialized = false;
   hostConnectedPanorama = null;
   suppressNextPanoramaRemovalNotice = false;
-  window.removeEventListener("message", handleHostMessage);
+  removeHostMessageUnsubscribe?.();
+  removeHostMessageUnsubscribe = null;
   removeUnsubscribe?.();
   removeUnsubscribe = null;
 }
